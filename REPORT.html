@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Project 1 实验报告</title>
+<style>
+body { font-family: "PingFang SC", "Songti SC", serif; font-size: 10.5pt; line-height: 1.62; color: #23231f; margin: 0 6pt; }
+h1 { font-size: 18pt; color: #0F6E56; margin: 0 0 2pt; }
+h2 { font-size: 12.5pt; color: #0F6E56; margin: 13pt 0 5pt; border-bottom: 1px solid #d6d3c8; padding-bottom: 2pt; }
+p  { margin: 4pt 0; text-align: justify; }
+.meta { color: #6b6a64; font-size: 9.5pt; margin: 0 0 2pt; }
+.lead { color: #3d3c37; font-size: 10pt; }
+table { border-collapse: collapse; width: 100%; font-size: 8.8pt; margin: 5pt 0; }
+th { background: #E1F5EE; border: 1px solid #c8c6bb; padding: 3pt 5pt; text-align: left; font-weight: bold; }
+td { border: 1px solid #c8c6bb; padding: 3pt 5pt; }
+pre { background: #F6F4EF; border: 1px solid #dcd8cc; padding: 6pt 8pt; font-family: Menlo, "Courier New", monospace;
+      font-size: 8.4pt; line-height: 1.45; margin: 5pt 0; }
+.hl { font-weight: bold; color: #0F6E56; }
+.err { font-family: Menlo, monospace; font-size: 8.2pt; color: #A32D2D; }
+.cap { font-size: 8.8pt; color: #75746c; text-align: center; margin: 2pt 0 8pt; }
+.fig { text-align: center; margin: 6pt 0 0; }
+ul { margin: 4pt 0 4pt 0; padding-left: 16pt; }
+li { margin: 2pt 0; }
+small { color: #6b6a64; }
+</style>
+</head>
+<body>
+
+<h1>Project 1 实验报告</h1>
+<p class="lead"><b>用 NumPy 复现 OpenCLIP ViT-B/32 图像编码器的前向计算</b></p>
+<p class="meta">姓名：李采阳　|　学号：2025681061　|　日期：2026-11-24</p>
+<p class="meta">代码：image_encoder.py（含中文注释）　运行说明：README.md　仓库：https://github.com/KeseraYoru/project1</p>
+
+<h2>1　完成情况与复现</h2>
+<p>仅用 NumPy 实现图像塔的完整前向：输入 <code>[B,3,224,224]</code>，输出每张图一个 512 维、长度为 1 的向量。六个 TODO 共 10 处空位、22 行代码全部完成，未使用 PyTorch / OpenCLIP 包，参数固定不更新、不含任何训练。<code>check.py --stage all</code> 八个阶段全部 PASS，<code>run.py</code> 产出 <code>(10,512)</code>。运行环境为 Python 3.14.3 + NumPy 2.5.4 + Pillow 13.0.0，CPU 推理，全部数组 float32。</p>
+<pre>python -m pip install -r requirements.txt
+python check.py --stage all          # 八个阶段数值检查
+python run.py --output output_tokens.npz</pre>
+
+<h2>2　数据流：形状只在这四处改变</h2>
+<p class="fig"><img src="figure_pipeline.png" style="width:100%"></p>
+<p class="cap">图 1　图像塔前向数据流，标注了每个阶段的形状与本项目对应的 TODO</p>
+<p>图像被切成 7×7 个 32×32 的块并投影到 768 维，头顶插入 1 个 CLS 空位后变 50 行，随后 12 层 Transformer 内部形状<strong>恒为 50×768</strong>——这正是两条残差可以逐层相加的前提；最后只取 CLS 那一行，经后置 Norm 与视觉投影压成 512 维并单位化。</p>
+
+<h2>3　分阶段数值误差</h2>
+<p>容差：preprocess 为 atol=2e-6，output / batch 为 atol=2e-5，内部阶段 2e-4，统一 rtol=2e-4。下表为 <code>check.py --stage all</code> 的原始输出。</p>
+<table>
+<tr><th>阶段</th><th>输出形状</th><th>max_abs</th><th>mean_abs</th><th>判定</th></tr>
+<tr><td>assets</td><td>152 个张量</td><td>—</td><td>—</td><td>PASS</td></tr>
+<tr><td>preprocess</td><td>(10, 3, 224, 224)</td><td>0.000e+00</td><td>0.000e+00</td><td>PASS</td></tr>
+<tr><td>patches</td><td>(2, 49, 3072)</td><td>0.000e+00</td><td>0.000e+00</td><td>PASS</td></tr>
+<tr><td>tokens</td><td>(2, 50, 768)</td><td>0.000e+00</td><td>0.000e+00</td><td>PASS</td></tr>
+<tr><td>block0</td><td>(2, 50, 768)</td><td>7.540e-06</td><td>2.274e-07</td><td>PASS</td></tr>
+<tr><td>last_tokens</td><td>(2, 50, 768)</td><td>4.387e-05</td><td>2.406e-06</td><td>PASS</td></tr>
+<tr><td>output</td><td>(10, 512)</td><td>6.780e-07</td><td>8.215e-08</td><td>PASS</td></tr>
+<tr><td>batch</td><td>(3, 512)</td><td>4.619e-07</td><td>8.133e-08</td><td>PASS</td></tr>
+</table>
+<p><b>三点解读：</b>① patches 与 tokens 误差为 0，因为这两段只做重排、展平和一次投影，没有逐层浮点累加；② 误差从 block0（7.5e-06）出现，随深度累积到 last_tokens（4.4e-05），仍比容差 2e-4 低近一个数量级；③ output 经单位化后数值回到 O(1)，绝对误差降至 6.8e-07，batch 阶段（顺序 [1,0,1]，同一张图出现两次）与 output 同量级，说明批量与重复图不影响正确性。</p>
+
+<h2>4　一个形状变化：patchify 的 [B,3,224,224] → [B,49,3072]</h2>
+<p>patch 为 32×32，224/32 = 7，故每张图 7×7 = 49 块；每块含 3 个 32×32 通道平面，摊平为 3×32×32 = 3072。编号顺序为<b>先左→右、再上→下</b>，块内按 <b>C→H→W</b> 摊平。三步全是零拷贝的视图操作，<span class="hl">只有最后一次 reshape 因内存不连续而真正复制一次</span>。</p>
+<pre>b, c, h, w = images.shape
+p = 32
+nh, nw = h // p, w // p
+grid = images.reshape(b, c, nh, p, nw, p)        # [B,C,块行,行内,块列,列内]
+<span class="hl">return grid.transpose(0, 2, 4, 1, 3, 5).reshape(b, nh * nw, c * p * p)</span></pre>
+<table>
+<tr><th>步骤</th><th>轴顺序</th><th>含义</th></tr>
+<tr><td>输入</td><td>B, C, H, W</td><td>通道优先的图像</td></tr>
+<tr><td>reshape</td><td>B, C, 块行, 行内, 块列, 列内</td><td>H、W 各拆成「块号」与「块内位置」</td></tr>
+<tr><td>transpose(0,2,4,1,3,5)</td><td>B, 块行, 块列, C, 行内, 列内</td><td>把两个「块」轴提到一起</td></tr>
+<tr><td>reshape</td><td>B, 49, 3072</td><td>前两轴合成 patch 编号，后三轴合成像素编号</td></tr>
+</table>
+<p><b>关键在于通道轴 C 的位置</b>：它必须留在「块内」那一段的最前面。若把 C 挪到「块」之前，结果仍是 [B,49,3072]，check.py 不会报形状错，只会报数值不对，属于最难排查的一类错误。正确性用两种方式验证：4×4 玩具数组的 patch 0 恰为角点 <code>[0,1,4,5]</code>；真实输入下与「双层循环暴力切片」的结果 <code>array_equal</code> 为 True。</p>
+
+<h2>5　修过的一个 bug：keepdims 缺失导致广播失败</h2>
+<pre>x - x.mean(axis=-1)
+<span class="err">ValueError: operands could not be broadcast together with shapes (2,3) (2,)</span></pre>
+<p>(2,3) 沿 axis=-1 求均值后维度塌陷为 (2,)，广播从右往左对齐时 3 与 2 冲突。改为 <span class="hl">x.mean(axis=-1, keepdims=True)</span> 得到 (2,3,1)，保留的 1 可拉伸成 3，广播成立。helpers.py 中 LayerNorm 的 <code>(B,L,1)</code> 与 <code>(B,L,D)</code> 相减同理。</p>
+<p>同类错误还有两处：<b>权重方向</b>——conv1 重排后是 [out,in]，直接 <code>patches @ W</code> 会报 core dimension 0 mismatch，必须写 <code>W.T</code>（除已是 [in,out] 的 visual.proj 外，本作业所有权重都需转置）；<b>dtype 提升</b>——缩放系数若写成 float64 标量，float32 结果会被整体提升为 float64 并触发 <code>AssertionError: use float32</code>，改用 <code>np.float32(1.0/np.sqrt(64))</code> 即修复。</p>
+
+<h2>6　关键实现点一览</h2>
+<table>
+<tr><th>位置</th><th>写法</th><th>形状</th></tr>
+<tr><td>patchify</td><td>reshape + transpose(0,2,4,1,3,5) + reshape</td><td>[B,3,224,224] → [B,49,3072]</td></tr>
+<tr><td>split_heads</td><td>reshape(B,N,H,D/H).transpose(0,2,1,3)</td><td>[B,N,768] → [B,12,N,64]</td></tr>
+<tr><td>scores</td><td>(q @ k.transpose(0,1,3,2)) * 0.125</td><td>[B,12,N,N]</td></tr>
+<tr><td>加权与合并</td><td>coefficients @ v，再 transpose(0,2,1,3) 拼回</td><td>[B,12,N,64] → [B,N,768]</td></tr>
+<tr><td>输出投影</td><td>merged @ out_weight.T + out_bias</td><td>[B,N,768]</td></tr>
+<tr><td>残差与 MLP</td><td>residual = x + attn(norm1(x))；residual + gelu(u@W1.T+b1)@W2.T+b2</td><td>[B,N,768]</td></tr>
+<tr><td>patch 投影</td><td>patches @ patch_weight.T（无 bias）</td><td>[B,49,3072] → [B,49,768]</td></tr>
+<tr><td>CLS 与位置</td><td>concatenate([cls, patches], axis=1) + position</td><td>[B,50,768]</td></tr>
+<tr><td>最终输出</td><td>unit_vector(post_norm(tokens[:,0,:]) @ proj)</td><td>[B,768] → [B,512]</td></tr>
+</table>
+<p>q/k/v 由 in_proj_weight 一次投影后沿特征轴三等分；k 为四维，转置只交换最后两轴，写成 <code>.T</code> 会连带翻转 batch 与 head 分组。softmax、GELU、LayerNorm 与最终单位化均使用提供的 helper，以保证与 Torch 参考对齐。</p>
+
+<h2>7　贡献与协助</h2>
+<ul>
+<li><b>实现</b>：六处代码初稿由 AI 助手（WorkBuddy）给出，我逐条核对形状并运行验证；</li>
+<li><b>定位</b>：按 check.py 阶段顺序找第一个不一致的阶段，再用 4×4 玩具数组确认 transpose 前后各轴的含义；</li>
+<li><b>排错</b>：keepdims 广播、<code>@</code> 维度不匹配、np.float64 类型提升三类报错均单独复现并核对堆栈原文；</li>
+<li><b>数据</b>：报告中全部误差数字取自 check.py --stage all 的原始输出，未手工调整；</li>
+<li><b>声明</b>：未使用他人代码，未把 assets/reference_outputs.npz 当作输入或缓存结果，output_tokens.npz 由 run.py 现场计算。</li>
+</ul>
+
+<h2>8　参考</h2>
+<p><small>作业附件 README.md、PPT-CODE-MAP.txt、transformer_steps.py、helpers.py 注释，以及课堂讲义 76 页。</small></p>
+
+</body>
+</html>

@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 虚拟环境
+venv/
+.venv/
+
+# 运行产物（由 run.py 现场生成，不提交）
+output_tokens.npz
+my_tokens.npz
+*.npz
+
+# 作业附件中的大文件（参数与参考数据，按提交要求不重复提交）
+weights/
+assets/
+
+# macOS
+.DS_Store
